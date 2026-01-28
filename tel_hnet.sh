@@ -1,8 +1,8 @@
 #!/bin/bash
-#SBATCH --job-name=hnet-train
+#SBATCH --job-name=santam-tok
 #SBATCH --ntasks-per-node=32
 #SBATCH --gres=gpu:A100-SXM4:2
-#SBATCH --time=24:00:00
+#SBATCH --time=2-00:00:00
 #SBATCH --output=hnet_train_%j.out
 #SBATCH --error=hnet_train_%j.err
 #SBATCH --mail-user=saketh.vemula@research.iiit.ac.in
@@ -17,6 +17,7 @@ source ~/santam-tok/hnet-venv/bin/activate
 
 # Default Language (can be overridden via --export=ALL,LANG_CODE=hin)
 : "${LANG_CODE:=tel}"
+export LANG_CODE=$LANG_CODE
 
 # Define directories
 # Assumes dataset structure: dataset/{lang}/*.txt
@@ -24,7 +25,14 @@ export DATA_PATH="~/santam-tok/dataset/${LANG_CODE}"
 export OUTPUT_DIR="~/santam-tok/checkpoints/hnets/${LANG_CODE}"
 
 # Create output directory
+rm -rf $OUTPUT_DIR
 mkdir -p $OUTPUT_DIR
+
+# --- HUGGING FACE REPO CONFIGURATION ---
+export HF_TOKEN=""
+export HF_REPO_ID=""
+export HF_SUBFOLDER="${LANG_CODE}"
+export HF_DELETE_LOCAL=1
 
 get_free_port() {
     python -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.bind(('', 0)); port = s.getsockname()[1]; s.close(); print(port)"
@@ -40,15 +48,19 @@ echo "MASTER_ADDR="$MASTER_ADDR
 # WandB Configuration
 export WANDB_API_KEY=""
 export WANDB_PROJECT="hnet-pretraining"
-
-# Hyperparameters
-BATCH_SIZE=32
-EPOCHS=40
-PATIENCE=1
+export WANDB_NAME="${LANG_CODE}_hnet"
 
 echo "Training H-Net for Language: $LANG_CODE"
 echo "Data: $DATA_PATH"
 echo "Output: $OUTPUT_DIR"
+
+# Hyperparameters
+BATCH_SIZE=32
+EPOCHS=50
+PATIENCE=2
+# Model Configuration (Target: ~3-5M parameters)
+MODEL_DIM="256 256"
+MODEL_ARCH="m2 T4"
 
 # Run Training
 # Using torchrun for distributed training
@@ -62,4 +74,6 @@ torchrun \
     --batch_size $BATCH_SIZE \
     --epochs $EPOCHS \
     --patience $PATIENCE \
-    --wandb_project "$WANDB_PROJECT"
+    --wandb_project "$WANDB_PROJECT" \
+    --model_dim $MODEL_DIM \
+    --model_arch $MODEL_ARCH

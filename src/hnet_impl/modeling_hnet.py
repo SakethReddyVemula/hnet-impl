@@ -321,7 +321,7 @@ class HNetLM(BlockBoundaryMixin, nn.Module):
             d[n.count("main_network")].append(p)
         # special-case innermost hnet which has redundant .main_network
         max_depth = max(d.keys())
-        assert 1 == len(d[max_depth - 1]), (
+        assert len(d[max_depth - 1]) <= 1, (
             f"expected single .pad_dimension at {max_depth - 1}"
         )
         d[max_depth - 1] += d.pop(max_depth)
