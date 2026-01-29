@@ -2,7 +2,8 @@
 #SBATCH --job-name=santam-tok
 #SBATCH --ntasks-per-node=2
 #SBATCH --gres=gpu:A100-SXM4:2
-#SBATCH --time=3-00:00:00
+#SBATCH --time=4-00:00:00
+#SBATCH --partition=dibdp
 #SBATCH --output=hnet_multilang_%j.out
 #SBATCH --error=hnet_multilang_%j.err
 #SBATCH --mail-user=saketh.vemula@research.iiit.ac.in
