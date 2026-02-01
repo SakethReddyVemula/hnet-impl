@@ -346,11 +346,19 @@ def main():
                 except Exception as e:
                     if local_rank == 0: print(f"Visualization failed: {e}")
         
+        # Save checkpoint for this epoch
+        state_dict = None
+        if ws > 1:
+             save_policy = fsdp.FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+             with fsdp.StateDictType(m, fsdp.StateDictType.FULL_STATE_DICT, save_policy):
+                 state_dict = m.state_dict()
+        else:
+             state_dict = m.state_dict()
+
         if local_rank == 0:
-            # Save checkpoint for this epoch
             try:
                 epoch_ckpt_path = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch+1}.pt")
-                torch.save(m.state_dict(), epoch_ckpt_path)
+                torch.save(state_dict, epoch_ckpt_path)
                 print(f"Saved checkpoint to {epoch_ckpt_path}")
                 
                 # Upload to HF
@@ -367,28 +375,23 @@ def main():
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 patience_counter = 0
-                try:
-                    torch.save(m.state_dict(), os.path.join(args.output_dir, "best_model.pt"))
-                    print(f"New best model saved with val loss {best_val_loss:.4f}")
-                    
-                    # Upload best model to HF
-                    best_model_path = os.path.join(args.output_dir, "best_model.pt")
-                    upload_checkpoint(
-                        best_model_path,
-                        repo_id=os.getenv("HF_REPO_ID"),
-                        token=os.getenv("HF_TOKEN"),
-                        subfolder=os.getenv("HF_SUBFOLDER"),
-                        delete_local=False # Always keep best model locally? Or respect flag? 
-                        # Usually we might want to keep the best model, but if space is tight, maybe delete. 
-                        # The user said "automatically save... to huggingface repo", implying backup.
-                        # Let's respect the flag but maybe default to False for best model if not explicitly handled?
-                        # The user set HF_DELETE_LOCAL=1 in the script. 
-                        # If I delete best_model.pt, I can't resume or use it easily locally without downloading.
-                        # But if the user wants to save space...
-                        # Let's just respect the flag for consistency.
-                    )
-                except Exception as e:
-                    print(f"Failed to save best model: {e}")
+                
+                if local_rank == 0:
+                    try:
+                        torch.save(state_dict, os.path.join(args.output_dir, "best_model.pt"))
+                        print(f"New best model saved with val loss {best_val_loss:.4f}")
+                        
+                        # Upload best model to HF
+                        best_model_path = os.path.join(args.output_dir, "best_model.pt")
+                        upload_checkpoint(
+                            best_model_path,
+                            repo_id=os.getenv("HF_REPO_ID"),
+                            token=os.getenv("HF_TOKEN"),
+                            subfolder=os.getenv("HF_SUBFOLDER"),
+                            delete_local=False 
+                        )
+                    except Exception as e:
+                        print(f"Failed to save best model: {e}")
             else:
                 patience_counter += 1
                 print(f"Val loss increased. Patience: {patience_counter}/{args.patience}")

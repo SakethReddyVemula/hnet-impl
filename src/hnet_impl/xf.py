@@ -123,8 +123,15 @@ class GLU(nn.Module):
         self.act = act
 
     def forward(self, x: TT):
-        h, g = self.fc1(x).chunk(2, dim=-1)
-        return self.fc2(self.act(g) * h)
+        # Cast weights to input dtype
+        w1 = self.fc1.weight.to(dtype=x.dtype)
+        out1 = F.linear(x, w1, self.fc1.bias.to(dtype=x.dtype) if self.fc1.bias is not None else None)
+        h, g = out1.chunk(2, dim=-1)
+        
+        act = self.act(g) * h
+        
+        w2 = self.fc2.weight.to(dtype=x.dtype)
+        return F.linear(act, w2, self.fc2.bias.to(dtype=x.dtype) if self.fc2.bias is not None else None)
 
 
 class CausalMHA(nn.Module):
@@ -159,8 +166,12 @@ class CausalMHA(nn.Module):
         assert max_seqlen <= self.msl, (
             f"rope was initialized with {self.msl} < {max_seqlen}"
         )
+        w_qkv = self.Wqkv.weight.to(dtype=x.dtype)
+        # bias is likely None for Wqkv (Lin defaults bias=False)
+        qkv = F.linear(x, w_qkv, self.Wqkv.bias.to(dtype=x.dtype) if self.Wqkv.bias is not None else None)
+        
         qk, v = (
-            self.Wqkv(x)
+            qkv
             .unflatten(-1, (-1, self.d_head))
             .split(2 * self.num_heads, dim=-2)
         )
@@ -182,7 +193,9 @@ class CausalMHA(nn.Module):
             causal=True,
             softmax_scale=self.softmax_scale,
         )
-        return self.out_proj(o.view(*x.shape))
+        w_out = self.out_proj.weight.to(dtype=x.dtype)
+        res = F.linear(o.view(*x.shape), w_out, self.out_proj.bias.to(dtype=x.dtype) if self.out_proj.bias is not None else None)
+        return res
 
 
 class Mamba2Simple(nn.Module):
@@ -269,26 +282,43 @@ class Mamba2Simple(nn.Module):
         )
 
     def forward(self, u: TT, seq_idx: TT) -> TT:
-        zxbcdt = self.in_proj(u)
+        # Cast weights to input dtype (bf16) to ensure compatibility if FSDP/Autocast fails to do so
+        # u is expected to be bf16
+        w_in = self.in_proj.weight.to(dtype=u.dtype)
+        zxbcdt = F.linear(u, w_in)
+        
         A = -torch.exp(self.A_log.float())
+        
+        # Cast conv weights
+        w_conv = self.conv1d.weight.to(dtype=u.dtype)
+        b_conv = self.conv1d.bias.to(dtype=u.dtype) if self.conv1d.bias is not None else None
+        
+        # We need to manually invoke conv1d if we cast weights, or just rely on implicit cast? 
+        # But F.conv1d handles it. The mamba_split_... kernel might take weights directly.
+        # Arguments to mamba_split_conv1d_scan_combined:
+        # conv1d_weight, conv1d_bias
+        
+        # Warning: converting weights creates copies. But it solves the runtime error.
+        
         out = mamba_split_conv1d_scan_combined(
             zxbcdt,
-            self.conv1d.weight.squeeze(-2),
-            self.conv1d.bias,
+            w_conv.squeeze(-2),
+            b_conv,
             self.dt_bias.type_as(u),
             A,
             D=self.D.type_as(u),
             chunk_size=self.chunk_size,
             seq_idx=seq_idx,
             activation=self.activation,
-            rmsnorm_weight=self.norm.weight,
+            rmsnorm_weight=self.norm.weight.to(dtype=u.dtype),
             rmsnorm_eps=self.norm.eps,
             headdim=self.headdim,
             ngroups=self.ngroups,
             norm_before_gate=self.norm_before_gate,
         )
-        # NOTE: I move out_proj outside of mamba2 kernel, in case fp8 is desired.
-        return self.out_proj(out)
+        
+        w_out = self.out_proj.weight.to(dtype=u.dtype)
+        return F.linear(out, w_out)
 
 
 """

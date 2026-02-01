@@ -79,8 +79,12 @@ class RoutingModule(nn.Module):
             self.k_proj_layer.weight.copy_(torch.eye(d))
 
     def forward(self, r_flat: TT, r_cu: TT):
-        k_flat = self.k_proj_layer(r_flat)
-        q_flat = QProjPadded.apply(r_flat, self.q_proj_layer.weight, k_flat, r_cu)
+        w_k = self.k_proj_layer.weight.to(dtype=r_flat.dtype)
+        k_flat = F.linear(r_flat, w_k, self.k_proj_layer.bias.to(dtype=r_flat.dtype) if self.k_proj_layer.bias is not None else None)
+        
+        w_q = self.q_proj_layer.weight.to(dtype=r_flat.dtype)
+        q_flat = QProjPadded.apply(r_flat, w_q, k_flat, r_cu)
+        
         cos_sim = F.cosine_similarity(q_flat, k_flat, dim=-1)
         p_flat = (0.5 - cos_sim / 2).clamp(0.0, 1.0)
         b_flat = p_flat >= 0.5

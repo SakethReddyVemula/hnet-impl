@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=santam-tok
-#SBATCH --ntasks-per-node=2
-#SBATCH --gres=gpu:A100-SXM4:2
+#SBATCH --ntasks-per-node=1
+#SBATCH --gres=gpu:A100-SXM4:1
 #SBATCH --time=4-00:00:00
 #SBATCH --partition=dibdp
 #SBATCH --output=hnet_multilang_%j.out
@@ -15,7 +15,7 @@ LANGS=("kat" "san" "fin" "hin" "hun" "snd" "kor" "gle" "mal" "ita" "tam" "spa" "
 
 # 2. Setup environment once
 source ~/santam-tok/hnet-venv/bin/activate
-export CUDA_VISIBLE_DEVICES=0,1
+export CUDA_VISIBLE_DEVICES=0
 
 get_free_port() {
     python -c "import socket; s = socket.socket(socket.AF_INET, socket.SOCK_STREAM); s.bind(('', 0)); port = s.getsockname()[1]; s.close(); print(port)"
@@ -71,7 +71,7 @@ for LANG in "${LANGS[@]}"; do
     # Using torchrun for distributed training
     torchrun \
         --master_port $MASTER_PORT \
-        --nproc_per_node 2 \
+        --nproc_per_node 1 \
         --nnodes 1 \
         train.py \
         --data_path "$DATA_PATH" \
