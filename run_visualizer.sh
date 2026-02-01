@@ -1,6 +1,7 @@
 #!/bin/bash
 
 # Activate the virtual environment
+export PYTHONUTF8=1
 source ~/santam-tok/hnet-venv/bin/activate
 
 # Check if streamlit is installed, if not install it

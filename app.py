@@ -95,30 +95,32 @@ CSS = """
 </style>
 """
 
-# Map termcolor colors to CSS colors
+# Map termcolor colors to CSS colors (Pastel Backgrounds)
 COLOR_MAP = {
-    "light_yellow": "#FFD700", # Gold
-    "light_green": "#90EE90",  # LightGreen
+    "light_yellow": "#FFF9C4", # Pastel Yellow
+    "light_green": "#E1F5FE",  # Pastel Light Blue
     "default": "#FFFFFF"       # White
 }
 BG_MAP = {
     "on_black": "transparent",
-    "on_dark_grey": "#444444", # DarkGray
+    "on_dark_grey": "transparent",
     "default": "transparent"
 }
 
 def html_colorize(text, color, on_color, attrs):
     """Generates HTML span for a character/segment."""
-    css_color = COLOR_MAP.get(color, "white")
-    css_bg = BG_MAP.get(on_color, "transparent")
+    # Use the 'color' key (from termcolor cycle) as the BACKGROUND color
+    css_bg = COLOR_MAP.get(color, "transparent") 
+    css_color = "#000000" # Always black text
     
     style_str = f"color: {css_color}; background-color: {css_bg};"
     
     classes = "segment-text seg-chunk"
+    # We ignore 'on_color' for background to keep it simple as requested
+    
     if "underline" in attrs:
         style_str += " text-decoration: underline;"
     if "blink" in attrs:
-        # Blink is annoying in web, maybe just bold or border?
         style_str += " border: 1px solid red;" 
     if "dark" in attrs:
         style_str += " opacity: 0.6;"
@@ -157,17 +159,38 @@ def visualize_segmentation(model, text):
              # if we want to change how it prints, BUT colorize_prefill yields token+style, 
              # so we can just iterate it!
             
-             gen = colorize_prefill(model, iids, aggregate_bytes_to_utf8)
-             
-             for char, style in gen:
-                 # style is dict(color=..., on_color=..., attrs=...)
-                 html_fragment = html_colorize(
-                     char, 
-                     style.get('color'), 
-                     style.get('on_color'), 
-                     style.get('attrs', [])
-                 )
-                 html_output.append(html_fragment)
+            gen = colorize_prefill(model, iids, aggregate_bytes_to_utf8)
+            
+            # Aggregate consecutive characters with same style
+            current_segment = ""
+            current_style = None
+
+            for char, style in gen:
+                # Check if style matches current buffer
+                if current_style is not None and style == current_style:
+                    current_segment += char
+                else:
+                    # Flush old segment
+                    if current_segment:
+                        html_output.append(html_colorize(
+                            current_segment, 
+                            current_style.get('color'), 
+                            current_style.get('on_color'), 
+                            current_style.get('attrs', [])
+                        ))
+                    
+                    # Start new segment
+                    current_segment = char
+                    current_style = style
+            
+            # Flush remaining
+            if current_segment:
+                html_output.append(html_colorize(
+                    current_segment, 
+                    current_style.get('color'), 
+                    current_style.get('on_color'), 
+                    current_style.get('attrs', [])
+                ))
                  
     except Exception as e:
         return f"<div style='color:red'>Visualization Error: {str(e)}</div>"
