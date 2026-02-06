@@ -134,10 +134,11 @@ def load_and_split_data(data_path, split_ratios=(0.8, 0.1, 0.1), seed=42, local_
     return train_data, val_data, test_data
 
 # --- Training Logic ---
-def train_epoch(model, dataloader, optimizer, scheduler, ws, device, log_interval=100, epoch=0):
+def train_epoch(model, dataloader, optimizer, scheduler, ws, device, log_interval=100, epoch=0, ratio_loss_scale=1.0, warmup_compression_epochs=0):
     model.train()
     total_loss = 0
     steps = 0
+    max_steps = (len(dataloader) * (model.c.d_model[0] * 0 + 100)) # dummy
     
     iterator = dataloader
     if dist.get_rank() == 0:
@@ -152,7 +153,13 @@ def train_epoch(model, dataloader, optimizer, scheduler, ws, device, log_interva
             (l_avg, l_sum), extra = model(iids, lbls)
             zero = torch.tensor(0.0, device=device)
             l_ratio = sum([e.loss_ratio for e in extra], zero)
-            loss = l_avg + l_ratio
+            
+            # Weighted ratio loss with simple linear warmup
+            alpha = ratio_loss_scale
+            if warmup_compression_epochs > 0:
+                alpha *= min(1.0, (epoch + 1) / (warmup_compression_epochs + 1))
+            
+            loss = l_avg + alpha * l_ratio
         
         loss.backward()
         optimizer.step()
@@ -240,6 +247,10 @@ def main():
     parser.add_argument("--max_length", type=int, default=4096, help="Maximum sequence length")
     parser.add_argument("--model_dim", type=int, nargs="+", default=[512, 1024], help="Model dimensions (D)")
     parser.add_argument("--model_arch", type=str, nargs="+", default=["m4", "T9"], help="Model architecture (arch)")
+    parser.add_argument("--weight_decay", type=float, default=0.01, help="Weight decay")
+    parser.add_argument("--scheduler", type=str, default="trapezoidal", choices=["trapezoidal", "cosine"], help="LR Scheduler")
+    parser.add_argument("--ratio_loss_scale", type=float, default=1.0, help="Scale factor for ratio loss")
+    parser.add_argument("--warmup_compression_epochs", type=int, default=0, help="Epochs to warmup compression loss")
     args = parser.parse_args()
 
     r, ws, local_rank, mesh = setup_distributed()
@@ -296,14 +307,27 @@ def main():
             for ls, lr_mod in zip(m.split_params_by_hierachy(), c.lambda_s())
         ],
         betas=(0.9, 0.95),
-        weight_decay=0.01,
+        weight_decay=args.weight_decay,
     )
     
-    lrs = torch.optim.lr_scheduler.LambdaLR(
-        opt,
-        lambda step: (pct := step / max_steps)
-        and (pct * 10 if pct < 0.1 else (1 if pct < 0.9 else (1 - pct) * 10)),
-    )
+    if args.scheduler == "cosine":
+        # Cosine decay with linear warmup (first 10% steps)
+        def lr_lambda(step):
+            pct = step / max_steps
+            if pct < 0.1:
+                return pct * 10
+            else:
+                progress = (pct - 0.1) / 0.9
+                return 0.5 * (1 + torch.cos(torch.tensor(progress * 3.14159)))
+        
+        lrs = torch.optim.lr_scheduler.LambdaLR(opt, lr_lambda)
+    else:
+        # Trapezoidal
+        lrs = torch.optim.lr_scheduler.LambdaLR(
+            opt,
+            lambda step: (pct := step / max_steps)
+            and (pct * 10 if pct < 0.1 else (1 if pct < 0.9 else (1 - pct) * 10)),
+        )
 
     best_val_loss = float('inf')
     patience_counter = 0
@@ -318,7 +342,8 @@ def main():
             
         start_time = time.time()
         start_time = time.time()
-        train_loss = train_epoch(m, train_loader, opt, lrs, ws, device, log_interval=args.log_interval, epoch=epoch)
+        train_loss = train_epoch(m, train_loader, opt, lrs, ws, device, log_interval=args.log_interval, epoch=epoch, 
+                                 ratio_loss_scale=args.ratio_loss_scale, warmup_compression_epochs=args.warmup_compression_epochs)
         val_loss = validate(m, val_loader, ws, device)
         val_loss = validate(m, val_loader, ws, device)
         

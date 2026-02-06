@@ -11,7 +11,7 @@
 #SBATCH --export=ALL,JOB_DESCRIPTION="Machine translation for Indian languages faces challenges such as rich morphology agglutination free word order and limited annotated resources This project focuses on tokenization strategies for Sanskrit Tamil translation incorporating linguistic knowledge from grammar literature vocabulary and parallel corpora Effective tokenization enables better representation of morphological units compound words and verse structure supporting accurate interpretation of ayurveda itihasa purana poetry prose anvaya philosophy and temple texts",EXPECTED_OUTCOME="The outcome is improved Sanskrit Tamil translation quality through robust tokenization methods that handle morphology compounds and long range dependencies By aligning tokens with linguistic and domain knowledge models better preserve grammatical agreement poetic structure anvaya interpretation and cultural nuance This leads to clearer more consistent translations of ayurvedic concepts historical narratives and literary texts supporting education research digital archives heritage studies and multilingual knowledge dissemination systems"
 
 # 1. Define your languages
-LANGS=("kat" "san" "fin" "hin" "hun" "snd" "kor" "gle" "mal" "ita" "tam" "spa" "tel" "hrv" "kir" "rus" "tur" "mon" "ell" "ind" "lav" "isl" "fas" "swe" "afr" "heb" "eng")
+LANGS=("tel", "hin", "eng", "fin")
 
 # 2. Setup environment once
 source ~/santam-tok/hnet-venv/bin/activate
@@ -61,15 +61,15 @@ for LANG in "${LANGS[@]}"; do
 
     # Hyperparameters
     BATCH_SIZE=64
-    EPOCHS=100
-    PATIENCE=10
+    EPOCHS=50
+    PATIENCE=5
     # Model Configuration (Target: ~3-5M parameters)
-    MODEL_DIM="256 512" # "256 512" for ~29M parameters
-    MODEL_ARCH="m4 T8" # "m4 T8" for ~29M parameters
+    MODEL_DIM="256 256" # "256 512" for ~29M parameters
+    MODEL_ARCH="m2 T4" # "m4 T8" for ~29M parameters
     
     # Tuning Hyperparameters
-    RATIO_LOSS_SCALE=2.0 # Increase to 2.0 or 5.0 to force compression
-    WARMUP_COMPRESSION_EPOCHS=0 # Set to 5 to 10 to delay compression learning
+    RATIO_LOSS_SCALE=5.0 # Increase to 2.0 or 5.0 to force compression
+    WARMUP_COMPRESSION_EPOCHS=2 # Set to 5 to 10 to delay compression learning
     WEIGHT_DECAY=0.01 # Increase to 0.1 for regularization
     SCHEDULER="cosine" # "cosine" / "trapezoidal" (default)
 
