@@ -15,9 +15,10 @@ from hnet_impl import HNetLM, HNetConfig, ByteTokenizer, completion_sync
 from tqdm import tqdm
 import wandb
 try:
-    from huggingface_hub import HfApi
+    from huggingface_hub import HfApi, CommitOperationAdd
 except ImportError:
     HfApi = None
+    CommitOperationAdd = None
 
 # --- Distributed Init ---
 def setup_distributed():
@@ -134,7 +135,92 @@ def load_and_split_data(data_path, split_ratios=(0.8, 0.1, 0.1), seed=42, local_
     return train_data, val_data, test_data
 
 # --- Training Logic ---
-def train_epoch(model, dataloader, optimizer, scheduler, ws, device, log_interval=100, epoch=0, ratio_loss_scale=1.0, warmup_compression_epochs=0):
+# --- Batched HF Upload ---
+pending_uploads = []  # List of local file paths queued for upload
+
+def queue_for_upload(file_path):
+    """Add a checkpoint to the upload queue."""
+    pending_uploads.append(file_path)
+
+def flush_uploads(repo_id, token, subfolder=None, delete_local=False, force=False, batch_size=3):
+    """Upload all queued checkpoints in a single commit if batch is full or force=True."""
+    if not pending_uploads:
+        return
+    if not force and len(pending_uploads) < batch_size:
+        return
+
+    if HfApi is None or CommitOperationAdd is None:
+        print("huggingface_hub not installed, skipping upload.")
+        return
+    if not repo_id or not token:
+        print("HF_REPO_ID or HF_TOKEN not set, skipping upload.")
+        return
+
+    api = HfApi()
+    operations = []
+    files_to_upload = list(pending_uploads)  # snapshot
+
+    for fp in files_to_upload:
+        path_in_repo = os.path.basename(fp)
+        if subfolder:
+            path_in_repo = f"{subfolder}/{path_in_repo}"
+        operations.append(CommitOperationAdd(path_or_fileobj=fp, path_in_repo=path_in_repo))
+
+    try:
+        filenames = [os.path.basename(fp) for fp in files_to_upload]
+        commit_msg = f"Upload {len(files_to_upload)} checkpoints: {', '.join(filenames)}"
+        print(f"Batch uploading {len(files_to_upload)} files to {repo_id}...")
+        api.create_commit(
+            repo_id=repo_id,
+            operations=operations,
+            commit_message=commit_msg,
+            token=token,
+        )
+        print(f"Successfully uploaded: {', '.join(filenames)}")
+
+        # Clear uploaded files from the queue
+        for fp in files_to_upload:
+            pending_uploads.remove(fp)
+
+        if delete_local:
+            for fp in files_to_upload:
+                if os.path.exists(fp):
+                    os.remove(fp)
+                    print(f"Deleted local file: {fp}")
+    except Exception as e:
+        print(f"Failed batch upload to Hugging Face: {e}")
+
+
+def save_step_checkpoint(model, global_step, output_dir, ws, local_rank, epoch=0, upload_batch_size=3):
+    """Save a step-based checkpoint locally and queue it for batched upload."""
+    state_dict = None
+    if ws > 1:
+        save_policy = fsdp.FullStateDictConfig(offload_to_cpu=True, rank0_only=True)
+        with fsdp.StateDictType(model, fsdp.StateDictType.FULL_STATE_DICT, save_policy):
+            state_dict = model.state_dict()
+    else:
+        state_dict = model.state_dict()
+
+    if local_rank == 0:
+        try:
+            ckpt_path = os.path.join(output_dir, f"checkpoint_{epoch + 1}_{global_step}.pt")
+            torch.save(state_dict, ckpt_path)
+            print(f"Saved step checkpoint to {ckpt_path}")
+            queue_for_upload(ckpt_path)
+            # Flush if batch is full
+            flush_uploads(
+                repo_id=os.getenv("HF_REPO_ID"),
+                token=os.getenv("HF_TOKEN"),
+                subfolder=os.getenv("HF_SUBFOLDER"),
+                delete_local=os.getenv("HF_DELETE_LOCAL", "0") == "1",
+                batch_size=upload_batch_size,
+            )
+        except Exception as e:
+            print(f"Failed to save step checkpoint: {e}")
+
+
+def train_epoch(model, dataloader, optimizer, scheduler, ws, device, log_interval=100, epoch=0, ratio_loss_scale=1.0, warmup_compression_epochs=0,
+                checkpoint_interval=0, global_step=0, output_dir=None, local_rank=0, upload_batch_size=3):
     model.train()
     total_loss = 0
     steps = 0
@@ -169,14 +255,17 @@ def train_epoch(model, dataloader, optimizer, scheduler, ws, device, log_interva
             
         total_loss += loss.item()
         steps += 1
+        global_step += 1
         
         if steps % log_interval == 0 and dist.get_rank() == 0:
-            wandb.log({"step_loss": loss.item(), "lr": scheduler.get_last_lr()[0], "step": steps + epoch * len(dataloader)})
-            # print(f"Epoch {epoch+1} | Step {steps} | Loss: {loss.item():.4f} | LR: {scheduler.get_last_lr()[0]:.6f}")
+            wandb.log({"step_loss": loss.item(), "lr": scheduler.get_last_lr()[0], "step": global_step})
+
+        # Step-based checkpointing
+        if checkpoint_interval > 0 and global_step % checkpoint_interval == 0:
+            save_step_checkpoint(model, global_step, output_dir, ws, local_rank, epoch=epoch, upload_batch_size=upload_batch_size)
+            model.train()  # Ensure model is back in train mode after checkpoint
         
-    return total_loss / steps if steps > 0 else 0
-        
-    return total_loss / steps if steps > 0 else 0
+    return total_loss / steps if steps > 0 else 0, global_step
 
 def validate(model, dataloader, ws, device):
     model.eval()
@@ -201,6 +290,7 @@ def validate(model, dataloader, ws, device):
     return total_loss / steps if steps > 0 else float('inf')
 
 def upload_checkpoint(file_path, repo_id, token, subfolder=None, delete_local=False):
+    """Legacy single-file upload. Used as fallback for best_model.pt."""
     if HfApi is None:
         print("huggingface_hub not installed, skipping upload.")
         return
@@ -251,6 +341,8 @@ def main():
     parser.add_argument("--scheduler", type=str, default="trapezoidal", choices=["trapezoidal", "cosine"], help="LR Scheduler")
     parser.add_argument("--ratio_loss_scale", type=float, default=1.0, help="Scale factor for ratio loss")
     parser.add_argument("--warmup_compression_epochs", type=int, default=0, help="Epochs to warmup compression loss")
+    parser.add_argument("--checkpoint_interval", type=int, default=0, help="Save and upload a checkpoint every N training steps (0 = disabled, only epoch-end checkpoints)")
+    parser.add_argument("--upload_batch_size", type=int, default=3, help="Number of checkpoints to batch into a single HF commit (reduces commit rate)")
     args = parser.parse_args()
 
     r, ws, local_rank, mesh = setup_distributed()
@@ -330,6 +422,7 @@ def main():
         )
 
     best_val_loss = float('inf')
+    global_step = 0
     patience_counter = 0
     
     if local_rank == 0:
@@ -341,10 +434,10 @@ def main():
             train_sampler.set_epoch(epoch)
             
         start_time = time.time()
-        start_time = time.time()
-        train_loss = train_epoch(m, train_loader, opt, lrs, ws, device, log_interval=args.log_interval, epoch=epoch, 
-                                 ratio_loss_scale=args.ratio_loss_scale, warmup_compression_epochs=args.warmup_compression_epochs)
-        val_loss = validate(m, val_loader, ws, device)
+        train_loss, global_step = train_epoch(m, train_loader, opt, lrs, ws, device, log_interval=args.log_interval, epoch=epoch, 
+                                 ratio_loss_scale=args.ratio_loss_scale, warmup_compression_epochs=args.warmup_compression_epochs,
+                                 checkpoint_interval=args.checkpoint_interval, global_step=global_step,
+                                 output_dir=args.output_dir, local_rank=local_rank, upload_batch_size=args.upload_batch_size)
         val_loss = validate(m, val_loader, ws, device)
         
         if ws > 1:
@@ -382,17 +475,18 @@ def main():
 
         if local_rank == 0:
             try:
-                epoch_ckpt_path = os.path.join(args.output_dir, f"checkpoint_epoch_{epoch+1}.pt")
+                epoch_ckpt_path = os.path.join(args.output_dir, f"checkpoint{epoch+1}.pt")
                 torch.save(state_dict, epoch_ckpt_path)
                 print(f"Saved checkpoint to {epoch_ckpt_path}")
                 
-                # Upload to HF
-                upload_checkpoint(
-                    epoch_ckpt_path,
+                # Queue epoch checkpoint and force-flush all pending uploads
+                queue_for_upload(epoch_ckpt_path)
+                flush_uploads(
                     repo_id=os.getenv("HF_REPO_ID"),
                     token=os.getenv("HF_TOKEN"),
                     subfolder=os.getenv("HF_SUBFOLDER"),
-                    delete_local=os.getenv("HF_DELETE_LOCAL", "0") == "1"
+                    delete_local=os.getenv("HF_DELETE_LOCAL", "0") == "1",
+                    force=True,  # Always flush at epoch end
                 )
             except Exception as e:
                 print(f"Failed to save epoch checkpoint: {e}")

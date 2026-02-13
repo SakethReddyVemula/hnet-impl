@@ -64,19 +64,34 @@ def load_model(checkpoint_path, model_dim, model_arch):
         st.error(f"Error loading checkpoint {checkpoint_path}: {e}")
         return None, None
 
+def _checkpoint_sort_key(f):
+    """Sort key for checkpoint files. Handles formats:
+    - checkpoint{N}.pt           (epoch-end)  -> (epoch, 999999)
+    - checkpoint_{epoch}_{step}.pt (step-based) -> (epoch, step)
+    - checkpoint_epoch_N.pt       (legacy)     -> (epoch, 999999)
+    """
+    import re
+    base = os.path.basename(f)
+    # Step-based: checkpoint_{epoch}_{step}.pt
+    m = re.match(r'checkpoint_(\d+)_(\d+)\.pt$', base)
+    if m:
+        return (int(m.group(1)), int(m.group(2)))
+    # Epoch-end: checkpoint{N}.pt
+    m = re.match(r'checkpoint(\d+)\.pt$', base)
+    if m:
+        return (int(m.group(1)), 999999)
+    # Legacy: checkpoint_epoch_N.pt
+    m = re.match(r'checkpoint_epoch_(\d+)\.pt$', base)
+    if m:
+        return (int(m.group(1)), 999999)
+    return (0, 0)
+
 def get_checkpoints(directory):
-    """List all .pt files in the directory sorted by modification time or name."""
+    """List all .pt files in the directory sorted by epoch then step."""
     if not os.path.exists(directory):
         return []
     files = glob.glob(os.path.join(directory, "*.pt"))
-    # Sort by epoch number if possible, else by name
-    # assuming format "checkpoint_epoch_N.pt"
-    def sort_key(f):
-        try:
-            return int(f.split("_epoch_")[-1].split(".")[0])
-        except:
-            return 0
-    return sorted(files, key=sort_key)
+    return sorted(files, key=_checkpoint_sort_key)
 
 # Styles for visualization
 CSS = """
@@ -223,7 +238,7 @@ def main():
     # Model Config (Defaults from script)
     st.sidebar.subheader("Model Architecture")
     dim_str = st.sidebar.text_input("Model Dimensions (D)", value="256 256")
-    arch_str = st.sidebar.text_input("Model Architecture", value="m2 T4")
+    arch_str = st.sidebar.text_input("Model Architecture", value="m1 T2")
     
     try:
         model_dims = [int(x) for x in dim_str.split()]
@@ -261,13 +276,7 @@ def main():
                     st.sidebar.warning(f"No .pt files found in {hf_repo}/{subfolder}")
                 else:
                     # Sort them
-                    def sort_key_hf(f):
-                        try:
-                            # expecting "eng/checkpoint_epoch_1.pt"
-                            return int(f.split("_epoch_")[-1].split(".")[0])
-                        except:
-                            return 0
-                    checkpoints = sorted(ckpt_files, key=sort_key_hf)
+                    checkpoints = sorted(ckpt_files, key=_checkpoint_sort_key)
                     st.sidebar.success(f"Found {len(checkpoints)} remote checkpoints")
                     
             except Exception as e:
