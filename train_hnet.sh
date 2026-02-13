@@ -11,7 +11,7 @@
 #SBATCH --export=ALL,JOB_DESCRIPTION="Machine translation for Indian languages faces challenges such as rich morphology agglutination free word order and limited annotated resources This project focuses on tokenization strategies for Sanskrit Tamil translation incorporating linguistic knowledge from grammar literature vocabulary and parallel corpora Effective tokenization enables better representation of morphological units compound words and verse structure supporting accurate interpretation of ayurveda itihasa purana poetry prose anvaya philosophy and temple texts",EXPECTED_OUTCOME="The outcome is improved Sanskrit Tamil translation quality through robust tokenization methods that handle morphology compounds and long range dependencies By aligning tokens with linguistic and domain knowledge models better preserve grammatical agreement poetic structure anvaya interpretation and cultural nuance This leads to clearer more consistent translations of ayurvedic concepts historical narratives and literary texts supporting education research digital archives heritage studies and multilingual knowledge dissemination systems"
 
 # 1. Define your languages
-LANGS=("tel", "hin", "eng", "fin")
+LANGS=("tel" "hin" "eng" "fin")
 
 # 2. Setup environment once
 source ~/santam-tok/hnet-venv/bin/activate
@@ -72,6 +72,8 @@ for LANG in "${LANGS[@]}"; do
     WARMUP_COMPRESSION_EPOCHS=2 # Set to 5 to 10 to delay compression learning
     WEIGHT_DECAY=0.01 # Increase to 0.1 for regularization
     SCHEDULER="cosine" # "cosine" / "trapezoidal" (default)
+    CHECKPOINT_INTERVAL=500 # Save checkpoint every N steps (0 = disabled, only epoch-end)
+    UPLOAD_BATCH_SIZE=3 # Number of checkpoints to batch into a single HF commit
 
     # Run Training
     # Using torchrun for distributed training
@@ -92,7 +94,9 @@ for LANG in "${LANGS[@]}"; do
         --ratio_loss_scale $RATIO_LOSS_SCALE \
         --warmup_compression_epochs $WARMUP_COMPRESSION_EPOCHS \
         --weight_decay $WEIGHT_DECAY \
-        --scheduler $SCHEDULER
+        --scheduler $SCHEDULER \
+        --checkpoint_interval $CHECKPOINT_INTERVAL \
+        --upload_batch_size $UPLOAD_BATCH_SIZE
 
     rm -r $OUTPUT_DIR
     echo "COMPLETED: $LANG"
