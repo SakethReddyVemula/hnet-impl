@@ -59,12 +59,15 @@ class TextDataset(Dataset):
         return tokens
 
 def collate_fn(batch):
-    batch = [b for b in batch if len(b) > 1]
+    batch = [b for b in batch if len(b) > 0]
     if not batch: return None
-    iids_list = [b[:-1] for b in batch]
-    lbls_list = [b[1:] for b in batch]
+    # Add a trailing space token (byte 32) to the end of each sequence to simulate word boundaries
+    # H-Nets depend on looking at the next token (usually a space) to decide if a segment is complete.
+    iids_list = [torch.cat([b, torch.tensor([32], dtype=b.dtype, device=b.device)]) for b in batch]
     def NJT(ls: list[TT]): return nested.nested_tensor(ls, layout=torch.jagged)
-    return NJT(iids_list), NJT(lbls_list).long()
+    # Return None for labels since we only need input ids for inference
+    return NJT(iids_list), None
+
 
 # --- Model Loading ---
 def load_model(checkpoint_path, model_dim, model_arch, device):
@@ -147,7 +150,13 @@ def extract_segmentations(model, dataloader, device):
                 
                 cleaned_recons = []
                 for layer in recons:
+                    # Remove the \xfe BOS token representation
                     cl = [t.replace("\\xfe", "") for t in layer]
+                    
+                    # Also strip the trailing space from the last segment since we added it in collate_fn
+                    if len(cl) > 0:
+                        cl[-1] = cl[-1].rstrip(" ")
+                        
                     cl = [t for t in cl if t]
                     cleaned_recons.append(cl)
                     
@@ -282,8 +291,13 @@ def main():
         output_filename = f"seg_{args.lang_code}_{ckpt_name}.json"
         output_file = os.path.join(lang_output_dir, output_filename)
         
-        # Check if already evaluated
-        already_done = any(score['checkpoint'] == ckpt_name for score in all_scores)
+        # Check if already evaluated for all layers
+        already_done = False
+        for score in all_scores:
+            if score.get('checkpoint') == ckpt_name and 'layer' in score and not pd.isna(score['layer']):
+                already_done = True
+                break
+                
         if os.path.exists(output_file) and already_done:
             print(f"Skipping {ckpt_name}, already exists in {scores_file} and locally.")
             continue
@@ -313,13 +327,6 @@ def main():
         try:
             segmentations = extract_segmentations(model, val_loader, device)
             
-            # Map words to their highest-layer segmentation
-            pred_dict = {}
-            for w, recons in zip(words, segmentations):
-                # The reconstruct_tokens output is a list of layers. 
-                # Pick the highest layer (often index -1, or if multiple layers, the one that merges the most)
-                pred_dict[w] = recons[-1]
-                
             # Save segmentations mapping
             save_data = {
                 "words": words,
@@ -330,16 +337,25 @@ def main():
                 
             if args.upload_repo_id: queue_for_upload(output_file)
 
-            # Evaluate MorphScore
-            dummy_tokenizer = DummyTokenizer(pred_dict)
-            metrics = morph_evaluator.get_morphscore(dataset, dummy_tokenizer, return_df=False)
-            
-            metrics['checkpoint'] = ckpt_name
-            all_scores.append(metrics)
+            # Evaluate MorphScore for all layers
+            num_layers = len(segmentations[0]) if segmentations else 0
+            for layer_idx in range(num_layers):
+                pred_dict = {}
+                for w, recons in zip(words, segmentations):
+                    idx = min(layer_idx, len(recons) - 1)
+                    pred_dict[w] = recons[idx]
+                    
+                dummy_tokenizer = DummyTokenizer(pred_dict)
+                metrics = morph_evaluator.get_morphscore(dataset, dummy_tokenizer, return_df=False)
+                
+                metrics['checkpoint'] = ckpt_name
+                metrics['layer'] = layer_idx
+                all_scores.append(metrics)
+                
+                print(f"Evaluated {ckpt_name} Layer {layer_idx}: Precision {metrics['morphscore_precision']:.4f}, Recall {metrics['morphscore_recall']:.4f}")
             
             # Save metrics live
             pd.DataFrame(all_scores).to_csv(scores_file, index=False)
-            print(f"Evaluated {ckpt_name}: Precision {metrics['morphscore_precision']:.4f}, Recall {metrics['morphscore_recall']:.4f}")
 
             if args.upload_repo_id:
                 flush_uploads(repo_id=args.upload_repo_id, token=args.hf_token, subfolder=args.lang_code, delete_local=True, batch_size=3)
