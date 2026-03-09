@@ -14,7 +14,7 @@ export PYTHONPATH=$PYTHONPATH:$(pwd)/src
 export CUDA_VISIBLE_DEVICES=0
 
 # Configuration
-LANGS=("eng" "fin" "hun" "swe" "hrv" "rus" "mon")
+LANGS=("eng" "fin" "hun" "swe" "rus" "mon" "hrv")
 
 # Model Config
 MODEL_DIM="256 256"

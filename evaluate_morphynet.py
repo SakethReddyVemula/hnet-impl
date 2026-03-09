@@ -244,13 +244,10 @@ def main():
         infl_dataset = morph_evaluator.load_inflectional(infl_path) if os.path.exists(infl_path) else None
         deriv_dataset = morph_evaluator.load_derivational(deriv_path) if os.path.exists(deriv_path) else None
         
-        words = set()
-        if infl_dataset:
-            for e in infl_dataset: words.add(e['wordform'])
-        if deriv_dataset:
-            for e in deriv_dataset: words.add(e['wordform'])
-            
-        words = list(words)
+        infl_words = [e['wordform'] for e in infl_dataset] if infl_dataset else []
+        deriv_words = [e['wordform'] for e in deriv_dataset] if deriv_dataset else []
+        
+        words = set(infl_words + deriv_words)
         words = [w.strip() for w in words if w.strip()]
     except Exception as e:
         print(f"MorphyNet data error: {e}")
@@ -273,8 +270,8 @@ def main():
         except: pass
 
     for ckpt_name, ckpt_ref in checkpoints:
-        output_filename = f"seg_{args.lang_code}_{ckpt_name}.json"
-        output_file = os.path.join(lang_output_dir, output_filename)
+        infl_output_file = os.path.join(lang_output_dir, f"seg_infl_{args.lang_code}_{ckpt_name}.json")
+        deriv_output_file = os.path.join(lang_output_dir, f"seg_deriv_{args.lang_code}_{ckpt_name}.json")
         
         already_done = False
         for score in all_scores:
@@ -282,7 +279,10 @@ def main():
                 already_done = True
                 break
                 
-        if os.path.exists(output_file) and already_done:
+        infl_done = os.path.exists(infl_output_file) if infl_words else True
+        deriv_done = os.path.exists(deriv_output_file) if deriv_words else True
+                
+        if infl_done and deriv_done and already_done:
             print(f"Skipping {ckpt_name}, already exists in {scores_file} and locally.")
             continue
 
@@ -310,15 +310,25 @@ def main():
             
         try:
             segmentations = extract_segmentations(model, val_loader, device)
+            word_to_seg = {w: seg for w, seg in zip(words, segmentations)}
             
-            save_data = {
-                "words": words,
-                "segmentations": segmentations
-            }
-            with open(output_file, 'w', encoding='utf-8') as f:
-                json.dump(save_data, f, indent=2)
+            if infl_words:
+                infl_save_data = {
+                    "words": infl_words,
+                    "segmentations": [word_to_seg.get(w, [[w]]) for w in infl_words]
+                }
+                with open(infl_output_file, 'w', encoding='utf-8') as f:
+                    json.dump(infl_save_data, f, indent=2)
+                if args.upload_repo_id: queue_for_upload(infl_output_file)
                 
-            if args.upload_repo_id: queue_for_upload(output_file)
+            if deriv_words:
+                deriv_save_data = {
+                    "words": deriv_words,
+                    "segmentations": [word_to_seg.get(w, [[w]]) for w in deriv_words]
+                }
+                with open(deriv_output_file, 'w', encoding='utf-8') as f:
+                    json.dump(deriv_save_data, f, indent=2)
+                if args.upload_repo_id: queue_for_upload(deriv_output_file)
 
             num_layers = len(segmentations[0]) if segmentations else 0
             for layer_idx in range(num_layers):
